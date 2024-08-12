@@ -519,32 +519,65 @@ pub fn ReplType(comptime MessageBus: type) type {
                         return try buffer.toOwnedSlice();
                     },
                     .printable => |character| {
-                        try repl.terminal.print("{c}{s}", .{
-                            character,
-                            // Some terminals may not automatically move/scroll us down to the
-                            // next row after appending a character at the last column. This can
-                            // cause us to incorrectly report the cursor's position, so we force
-                            // the terminal to do so by moving the cursor forward and backward
-                            // one space.
-                            if (terminal_screen.cursor_column == terminal_screen.columns)
-                                "\x20\x08"
-                            else
-                                "",
-                        });
+                        const is_append = buffer_index == buffer.items.len;
+                        if (is_append) {
+                            try repl.terminal.print("{c}{s}", .{
+                                character,
+                                // Some terminals may not automatically move/scroll us down to the
+                                // next row after appending a character at the last column. This can
+                                // cause us to incorrectly report the cursor's position, so we force
+                                // the terminal to do so by moving the cursor forward and backward
+                                // one space.
+                                if (terminal_screen.cursor_column == terminal_screen.columns)
+                                    "\x20\x08"
+                                else
+                                    "",
+                            });
+                        } else {
+                            // If we're inserting mid-buffer, we need to redraw everything that
+                            // comes after as well.
+                            try repl.terminal.print("{c}{s}", .{
+                                character,
+                                buffer.items[buffer_index..],
+                            });
+                        }
+
                         terminal_screen.update_cursor_position(1);
-                        try buffer.append(character);
+                        try buffer.insert(buffer_index, character);
                         buffer_index += 1;
                     },
                     .backspace => if (buffer_index > 0) {
                         terminal_screen.update_cursor_position(-1);
-                        try repl.terminal.print("\x1b[{};{}H\x20\x1b[{};{}H", .{
+                        try repl.terminal.print("\x1b[{};{}H{s}\x20\x1b[{};{}H", .{
                             terminal_screen.cursor_row,
                             terminal_screen.cursor_column,
+                            // If we're deleting mid-buffer, we need to redraw everything that
+                            // comes after as well.
+                            if (buffer_index < buffer.items.len)
+                                buffer.items[buffer_index..]
+                            else
+                                "",
                             terminal_screen.cursor_row,
                             terminal_screen.cursor_column,
                         });
                         buffer_index -= 1;
                         _ = buffer.orderedRemove(buffer_index);
+                    },
+                    .left => if (buffer_index > 0) {
+                        terminal_screen.update_cursor_position(-1);
+                        try repl.terminal.print("\x1b[{};{}H", .{
+                            terminal_screen.cursor_row,
+                            terminal_screen.cursor_column,
+                        });
+                        buffer_index -= 1;
+                    },
+                    .right => if (buffer_index < buffer.items.len) {
+                        terminal_screen.update_cursor_position(1);
+                        try repl.terminal.print("\x1b[{};{}H", .{
+                            terminal_screen.cursor_row,
+                            terminal_screen.cursor_column,
+                        });
+                        buffer_index += 1;
                     },
                     .unhandled => {},
                 }
