@@ -436,6 +436,25 @@ pub const Parser = struct {
 
 pub fn ReplType(comptime MessageBus: type) type {
     const Client = vsr.Client(StateMachine, MessageBus);
+    const keywords = [_][]const u8{
+        "create_accounts",
+        "create_transfers",
+        "lookup_accounts",
+        "lookup_transfers",
+        "get_account_transfers",
+        "get_account_balances",
+        "query_accounts",
+        "query_transfers",
+        "help",
+        "id",
+        "code",
+        "ledger",
+        "flags",
+        "account_id",
+        "debit_account_id",
+        "credit_account_id",
+        "amount",
+    };
 
     return struct {
         event_loop_done: bool,
@@ -515,8 +534,27 @@ pub fn ReplType(comptime MessageBus: type) type {
             // Cache the buffer the user is typing into before navigating through history.
             var buffer_outside_history = std.ArrayList(u8).init(allocator);
 
+            var completions = std.ArrayList([]const u8).init(allocator);
+            var completion_index: usize = 0;
+            var completion_candidate_next: []const u8 = "";
+
+            var leading_buffer = std.ArrayList(u8).init(allocator);
+            var completion_target_word = std.ArrayList(u8).init(allocator);
+            var trailing_buffer = std.ArrayList(u8).init(allocator);
+
             while (buffer.items.len < single_repl_input_max) {
                 const user_input = try repl.terminal.read_user_input() orelse return null;
+
+                if (user_input != .tab and completions.items.len > 0) {
+                    completions.clearRetainingCapacity();
+                    completion_index = 0;
+                    try repl.terminal.print("\x1b[{};1H\x1b[J\x1b[{};{}H", .{
+                        terminal_screen.cursor_row + 1, 
+                        terminal_screen.cursor_row, 
+                        terminal_screen.cursor_column,
+                    });
+                }
+
                 switch (user_input) {
                     .ctrlc => {
                         // Erase everything below the current cursor's position in case Ctrl-C was
@@ -555,6 +593,94 @@ pub fn ReplType(comptime MessageBus: type) type {
                         terminal_screen.update_cursor_position(1);
                         try buffer.insert(buffer_index, character);
                         buffer_index += 1;
+                    },
+                    .tab => {
+                        //
+                        // > buffer_unchanged_before <word_to_be_completed> buffer_unchanged_after
+                        //
+                        // copy buffer_unchanged to a buffer, both before & after
+                        // get the compltion for the word
+                        // when a completion is available, print -
+                        //      prompt
+                        //      buffer_before
+                        //      completion
+                        //      buffer_after
+                        //
+                        var buffer_end = buffer_index;
+
+                        while (buffer_end > 0 and !std.ascii.isWhitespace(buffer.items[buffer_end - 1])) {
+                            buffer_end -= 1;
+                        }
+
+                        leading_buffer.clearRetainingCapacity();
+                        try leading_buffer.appendSlice(buffer.items[0..buffer_end]);
+
+                        trailing_buffer.clearRetainingCapacity();
+                        try trailing_buffer.appendSlice(buffer.items[buffer_index..]);
+
+                        if (completions.items.len == 0) {
+                            completion_target_word.clearRetainingCapacity();
+                            try completion_target_word.appendSlice(buffer.items[buffer_end..buffer_index]);
+
+                            completions = get_completions(allocator, completion_target_word.items);
+                        }
+
+                        if (completions.items.len > 0) {
+                            completion_candidate_next = completions.items[completion_index];
+                            completion_index = (completion_index + 1) % completions.items.len;
+                        } else {
+                            completion_candidate_next = completion_target_word.items;
+                        }
+
+                        terminal_screen.update_cursor_position(
+                            -@as(isize, @intCast(buffer_index)),
+                        );
+                        const row_current_buffer_start = terminal_screen.cursor_row;
+                        
+                        terminal_screen.update_cursor_position(
+                            @as(isize, @intCast(
+                                leading_buffer.items.len + completion_candidate_next.len))
+                        );
+
+                        try repl.terminal.print("\x1b[{};1H\x1b[J{s}{s}{s}{s}\x20\x08", .{
+                            row_current_buffer_start,
+                            prompt,
+                            leading_buffer.items,
+                            completion_candidate_next,
+                            trailing_buffer.items,
+                            // terminal_screen.cursor_row,
+                            // terminal_screen.cursor_column, 
+                        });
+
+                        if (terminal_screen.cursor_row == terminal_screen.rows){
+                            try repl.terminal.print("\n\x1b[{};{}H", .{
+                                terminal_screen.cursor_row,
+                                terminal_screen.cursor_column, 
+                            });
+                        }
+                        
+                        try repl.terminal.print("\x1b[{};1H", .{
+                            row_current_buffer_start + 1,
+                        });
+
+                        for(completions.items) |c| {
+                            if (std.mem.eql(u8, c, completion_candidate_next)){
+                                try repl.terminal.print(" \x1b[7m{s}\x1b[0m ", .{c});
+                            } else{
+                                try repl.terminal.print(" {s} ", .{c});
+                            }
+                        }
+
+                        try repl.terminal.print("\x1b[{};{}H", .{
+                            terminal_screen.cursor_row,
+                            terminal_screen.cursor_column, 
+                        });
+
+                        buffer.clearRetainingCapacity();
+                        try buffer.appendSlice(leading_buffer.items);
+                        try buffer.appendSlice(completion_candidate_next);
+                        try buffer.appendSlice(trailing_buffer.items);
+                        buffer_index = buffer.items.len - trailing_buffer.items.len;
                     },
                     .backspace => if (buffer_index > 0) {
                         terminal_screen.update_cursor_position(-1);
@@ -657,6 +783,21 @@ pub fn ReplType(comptime MessageBus: type) type {
                 }
             }
             return error.StreamTooLong;
+        }
+
+        fn get_completions(allocator: std.mem.Allocator, input: []const u8) std.ArrayList([]const u8) {
+            var matches = std.ArrayList([]const u8).init(allocator);
+
+            if (std.mem.eql(u8, input, "")) {
+                return matches;
+            }
+
+            for (keywords) |kw| {
+                if (std.mem.startsWith(u8, kw, input)) {
+                    matches.append(kw) catch continue;
+                }
+            }
+            return matches;
         }
 
         fn do_repl(
